@@ -300,11 +300,15 @@ func consoleDefaultFormatTimestamp(timeFormat string, noColor bool) Formatter {
 		t := "<nil>"
 		switch tt := i.(type) {
 		case string:
-			ts, err := time.Parse(TimeFieldFormat, tt)
-			if err != nil {
+			if TimeFieldFormat == timeFormat {
 				t = tt
 			} else {
-				t = ts.Format(timeFormat)
+				ts, err := time.Parse(TimeFieldFormat, tt)
+				if err != nil {
+					t = tt
+				} else {
+					t = ts.Format(timeFormat)
+				}
 			}
 		case json.Number:
 			i, err := tt.Int64()
