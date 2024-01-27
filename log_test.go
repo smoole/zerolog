@@ -2,6 +2,7 @@ package zerolog
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -119,7 +120,8 @@ func TestWith(t *testing.T) {
 		Uint64("uint64", 10).
 		Float32("float32", 11.101).
 		Float64("float64", 12.30303).
-		Time("time", time.Time{})
+		Time("time", time.Time{}).
+		Ctx(context.Background())
 	_, file, line, _ := runtime.Caller(0)
 	caller := fmt.Sprintf("%s:%d", file, line+3)
 	log := ctx.Caller().Logger()
@@ -320,6 +322,7 @@ func TestFields(t *testing.T) {
 		Bytes("bytes", []byte("bar")).
 		Hex("hex", []byte{0x12, 0xef}).
 		RawJSON("json", []byte(`{"some":"json"}`)).
+		RawCBOR("cbor", []byte{0x83, 0x01, 0x82, 0x02, 0x03, 0x82, 0x04, 0x05}).
 		Func(func(e *Event) { e.Str("func", "func_output") }).
 		AnErr("some_err", nil).
 		Err(errors.New("some error")).
@@ -343,8 +346,9 @@ func TestFields(t *testing.T) {
 		Dur("dur", 1*time.Second).
 		Time("time", time.Time{}).
 		TimeDiff("diff", now, now.Add(-10*time.Second)).
+		Ctx(context.Background()).
 		Msg("")
-	if got, want := decodeIfBinaryToString(out.Bytes()), `{"caller":"`+caller+`","string":"foo","stringer":"127.0.0.1","stringer_nil":null,"bytes":"bar","hex":"12ef","json":{"some":"json"},"func":"func_output","error":"some error","bool":true,"int":1,"int8":2,"int16":3,"int32":4,"int64":5,"uint":6,"uint8":7,"uint16":8,"uint32":9,"uint64":10,"IPv4":"192.168.0.100","IPv6":"2001:db8:85a3::8a2e:370:7334","Mac":"00:14:22:01:23:45","Prefix":"192.168.0.100/24","float32":11.1234,"float64":12.321321321,"dur":1000,"time":"0001-01-01T00:00:00Z","diff":10000}`+"\n"; got != want {
+	if got, want := decodeIfBinaryToString(out.Bytes()), `{"caller":"`+caller+`","string":"foo","stringer":"127.0.0.1","stringer_nil":null,"bytes":"bar","hex":"12ef","json":{"some":"json"},"cbor":"data:application/cbor;base64,gwGCAgOCBAU=","func":"func_output","error":"some error","bool":true,"int":1,"int8":2,"int16":3,"int32":4,"int64":5,"uint":6,"uint8":7,"uint16":8,"uint32":9,"uint64":10,"IPv4":"192.168.0.100","IPv6":"2001:db8:85a3::8a2e:370:7334","Mac":"00:14:22:01:23:45","Prefix":"192.168.0.100/24","float32":11.1234,"float64":12.321321321,"dur":1000,"time":"0001-01-01T00:00:00Z","diff":10000}`+"\n"; got != want {
 		t.Errorf("invalid log output:\ngot:  %v\nwant: %v", got, want)
 	}
 }
@@ -461,6 +465,7 @@ func TestFieldsDisabled(t *testing.T) {
 		Dur("dur", 1*time.Second).
 		Time("time", time.Time{}).
 		TimeDiff("diff", now, now.Add(-10*time.Second)).
+		Ctx(context.Background()).
 		Msg("")
 	if got, want := decodeIfBinaryToString(out.Bytes()), ""; got != want {
 		t.Errorf("invalid log output:\ngot:  %v\nwant: %v", got, want)
@@ -782,7 +787,7 @@ func TestCallerMarshalFunc(t *testing.T) {
 
 	// test default behaviour this is really brittle due to the line numbers
 	// actually mattering for validation
-	_, file, line, _ := runtime.Caller(0)
+	pc, file, line, _ := runtime.Caller(0)
 	caller := fmt.Sprintf("%s:%d", file, line+2)
 	log.Log().Caller().Msg("msg")
 	if got, want := decodeIfBinaryToString(out.Bytes()), `{"caller":"`+caller+`","message":"msg"}`+"\n"; got != want {
@@ -793,16 +798,16 @@ func TestCallerMarshalFunc(t *testing.T) {
 	// test custom behavior. In this case we'll take just the last directory
 	origCallerMarshalFunc := CallerMarshalFunc
 	defer func() { CallerMarshalFunc = origCallerMarshalFunc }()
-	CallerMarshalFunc = func(file string, line int) string {
+	CallerMarshalFunc = func(pc uintptr, file string, line int) string {
 		parts := strings.Split(file, "/")
 		if len(parts) > 1 {
 			return strings.Join(parts[len(parts)-2:], "/") + ":" + strconv.Itoa(line)
 		}
 
-		return file + ":" + strconv.Itoa(line)
+		return runtime.FuncForPC(pc).Name() + ":" + file + ":" + strconv.Itoa(line)
 	}
-	_, file, line, _ = runtime.Caller(0)
-	caller = CallerMarshalFunc(file, line+2)
+	pc, file, line, _ = runtime.Caller(0)
+	caller = CallerMarshalFunc(pc, file, line+2)
 	log.Log().Caller().Msg("msg")
 	if got, want := decodeIfBinaryToString(out.Bytes()), `{"caller":"`+caller+`","message":"msg"}`+"\n"; got != want {
 		t.Errorf("invalid log output:\ngot:  %v\nwant: %v", got, want)
@@ -907,6 +912,33 @@ func TestLevel_String(t *testing.T) {
 	}
 }
 
+func TestLevel_MarshalText(t *testing.T) {
+	tests := []struct {
+		name string
+		l    Level
+		want string
+	}{
+		{"trace", TraceLevel, "trace"},
+		{"debug", DebugLevel, "debug"},
+		{"info", InfoLevel, "info"},
+		{"warn", WarnLevel, "warn"},
+		{"error", ErrorLevel, "error"},
+		{"fatal", FatalLevel, "fatal"},
+		{"panic", PanicLevel, "panic"},
+		{"disabled", Disabled, "disabled"},
+		{"nolevel", NoLevel, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, err := tt.l.MarshalText(); err != nil {
+				t.Errorf("MarshalText couldn't marshal: %v", tt.l)
+			} else if string(got) != tt.want {
+				t.Errorf("String() = %v, want %v", string(got), tt.want)
+			}
+		})
+	}
+}
+
 func TestParseLevel(t *testing.T) {
 	type args struct {
 		levelStr string
@@ -939,6 +971,44 @@ func TestParseLevel(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Errorf("ParseLevel() got = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUnmarshalTextLevel(t *testing.T) {
+	type args struct {
+		levelStr string
+	}
+	tests := []struct {
+		name    string
+		args    args
+		want    Level
+		wantErr bool
+	}{
+		{"trace", args{"trace"}, TraceLevel, false},
+		{"debug", args{"debug"}, DebugLevel, false},
+		{"info", args{"info"}, InfoLevel, false},
+		{"warn", args{"warn"}, WarnLevel, false},
+		{"error", args{"error"}, ErrorLevel, false},
+		{"fatal", args{"fatal"}, FatalLevel, false},
+		{"panic", args{"panic"}, PanicLevel, false},
+		{"disabled", args{"disabled"}, Disabled, false},
+		{"nolevel", args{""}, NoLevel, false},
+		{"-1", args{"-1"}, TraceLevel, false},
+		{"-2", args{"-2"}, Level(-2), false},
+		{"-3", args{"-3"}, Level(-3), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var l Level
+			err := l.UnmarshalText([]byte(tt.args.levelStr))
+			if (err != nil) != tt.wantErr {
+				t.Errorf("UnmarshalText() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if l != tt.want {
+				t.Errorf("UnmarshalText() got = %v, want %v", l, tt.want)
 			}
 		})
 	}
